@@ -1,0 +1,14 @@
+<launch>
+    <!-- parameters for surface normal -->
+    <node pkg="surface_normal" type="surface_normal_node" name="surface_normal" output="screen" >
+        <rosparam>
+            minPointCloudSize: 1000 
+            depthError: 0.1
+            maxIterations: 100
+            minPlaneSize: 400
+            alpha: 1
+            groundPlaneNormal: [0.0, 1.0, 0.0]
+            epsAngle: 5.0
+        </rosparam>
+    </node>
+</launch>
