@@ -24,7 +24,9 @@ class SurfaceNormal{
         int minPlaneSize;
         float alpha;
         std::vector<double> groundPlaneNormal;
-        double epsAngle;
+        double  epsAngle, 
+                horizontalPlaneAngleThresh;
+        Eigen::Vector3f horizontalPlaneNormal;
 
         ros::Subscriber pointingFinger_subscriber, 
                         pointCloud_subscriber;
@@ -73,6 +75,16 @@ class SurfaceNormal{
         
         void removeHorizontalPlanes(pcl::PointCloud<pcl::PointXYZ>::Ptr & pointCloud, const sensor_msgs::PointCloud2Ptr &pointCloud_msg);
     
+        Eigen::Vector4f SurfaceNormal::getInersectionLinePlane(Eigen::Vector3f & pointA, Eigen::Vector3f & pointB, pcl::ModelCoefficients::Ptr & planeCoeff);
+        
+        Eigen::Matrix<float, 2,4> SurfaceNormal::getVecSpanOfLine(Eigen::Vector3f & pointA, Eigen::Vector3f & pointB);
+
+        Eigen::Vector3f SurfaceNormal::getSurfaceNormalVector(pcl::ModelCoefficients::Ptr &coefficients);
+        
+        Eigen::Matrix<float, 2,4> SurfaceNormal::getOrthogonalPlanesContainingLine(Eigen::Matrix<float, 2, 4> Wline);
+
+        Eigen::Vector4f SurfaceNormal::getIntersectionPointOf3Planes(Eigen::Vector4f plane1, Eigen::Vector4f plane2, Eigen::Vector4f plane3);
+
         void pointCloud_callback(const sensor_msgs::PointCloud2Ptr& pointCloud_msg);
 
 };

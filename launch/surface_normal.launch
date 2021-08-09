@@ -8,7 +8,8 @@
             minPlaneSize: 400
             alpha: 1
             groundPlaneNormal: [0.0, 1.0, 0.0]
-            epsAngle: 5.0
+            epsAngle: 10.0
+            horizontalPlaneAngleThresh: 20
         </rosparam>
     </node>
 </launch>

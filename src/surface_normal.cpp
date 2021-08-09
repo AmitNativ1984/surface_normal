@@ -14,8 +14,10 @@ SurfaceNormal::SurfaceNormal(ros::NodeHandle & nodeHandle){
     nodeHandle.getParam("surface_normal/maxIterations", maxIterations);
     nodeHandle.getParam("surface_normal/minPlaneSize", minPlaneSize);
     nodeHandle.getParam("surface_normal/alpha", alpha);
-    nodeHandle.getParam("surface_normal/groundPlaneNormal", groundPlaneNormal);
     nodeHandle.getParam("surface_normal/epsAngle", epsAngle);
+    nodeHandle.getParam("surface_normal/groundPlaneNormal", groundPlaneNormal);
+    nodeHandle.getParam("surface_normal/horizontalPlaneAngleThresh", horizontalPlaneAngleThresh);
+    horizontalPlaneNormal << groundPlaneNormal[0], groundPlaneNormal[1], groundPlaneNormal[2];
 
     initSubscribers(nodeHandle);
     initPublishers(nodeHandle);
@@ -74,10 +76,11 @@ void SurfaceNormal::initSegmentor(pcl::SACSegmentation<pcl::PointXYZ> &seg ) {
 
 void SurfaceNormal::initConcaveHull(pcl::ConcaveHull<pcl::PointXYZ> &chull){
     chull.setAlpha(alpha);
-    ROS_INFO("initConcaveHull init successfull");
+    ROS_INFO("init ConcaveHull init successfull");
 }
     
 void SurfaceNormal::pointingFinger_callback(const geometry_msgs::PointStampedPtr& pointStamped_msg){
+    // TODO: get pointing finger ray in map coordinates
     pointingFingerCamOptXYZ = *pointStamped_msg;
     ROS_INFO_STREAM(pointingFingerCamOptXYZ);
 }
@@ -150,6 +153,7 @@ void SurfaceNormal::removeHorizontalPlanes(pcl::PointCloud<pcl::PointXYZ>::Ptr &
     do {
         groundSeg.setInputCloud(pointCloud);
         groundSeg.segment(*inliers, *coefficients);
+        ROS_DEBUG("Horizontal plane containing %d points from main point cloud", inliers->indices.size());
         if (inliers->indices.size() > minPlaneSize){    
             projectInliersOn2DPlane(pointCloud, inliers, coefficients, projectedPlane);
             publishPointCloud(projectedPlane, pointCloud_msg, groundPlane_publisher);         // publishing ground plane
@@ -160,6 +164,91 @@ void SurfaceNormal::removeHorizontalPlanes(pcl::PointCloud<pcl::PointXYZ>::Ptr &
     
 }
 
+Eigen::Matrix<float, 2,4> SurfaceNormal::getVecSpanOfLine(Eigen::Vector3f & pointA, Eigen::Vector3f & pointB){
+    /*  return matrix representing a vector span of a line in homogenous coordinates.
+        inputs: pointA, pointB: two points in R3.
+        output: matrix representing a line in R4.
+    */
+    
+    Eigen::Vector4f p1, p2;
+    Eigen::Matrix<float, 2,4> Wline(2, 4);
+    p1 << pointA[0], pointA[1], pointA[2], 1;
+    p2 << pointB[0], pointB[1], pointB[2], 1;
+
+    Wline.row(0) = p1;
+    Wline.row(1) = p2;
+
+    return Wline;  
+}
+
+Eigen::Matrix<float, 2,4> SurfaceNormal::getOrthogonalPlanesContainingLine(Eigen::Matrix<float, 2, 4> Wline){
+    /*  Return matrix of planes in homogenous coordinates.
+        The planes form the rows of the output matrix.
+        Calculation is the two eigenvectors with smallest signular values resulting from SVD of line span matrix
+        (see: https://engineering.purdue.edu/kak/computervision/ECE661Folder/Lecture6.pdf)
+    */
+   using namespace Eigen;
+ 
+   Matrix<float, 2,4>  Wplanes;
+   MatrixXf U, S, V;
+
+    // SVD decomposition
+    JacobiSVD<Eigen::MatrixXf> svd(Wline, ComputeFullU | ComputeFullV);
+    U = svd.matrixU();
+    S = svd.singularValues();
+    V = svd.matrixV();
+
+    // get the two lowes vectors in V:
+    Wplanes.row(0) = V.col(2);
+    Wplanes.row(1) = V.col(3);
+
+    return Wplanes;
+}
+
+Eigen::Vector4f SurfaceNormal::getIntersectionPointOf3Planes(Eigen::Vector4f plane1, Eigen::Vector4f plane2, Eigen::Vector4f plane3){
+    /* the intersection point of three non parallel planes is a point.
+    (see: https://engineering.purdue.edu/kak/computervision/ECE661Folder/Lecture6.pdf)
+    */
+
+    using namespace Eigen;
+    Matrix<float, 3, 4> M;
+    Vector4f x;
+    Vector4f intersectionPoint;
+    M << plane1, plane2, plane3;
+    x << 0, 0, 0, 0;
+
+    // check if there is a solution. rank(M) == M.rows;
+    if (M.colPivHouseholderQr().rank() != M.rows()){
+        intersectionPoint << NAN, NAN, NAN, NAN;
+        return intersectionPoint;
+    }
+
+    intersectionPoint = M.colPivHouseholderQr().solve(x);
+    
+    return intersectionPoint;
+   
+}
+
+Eigen::Vector4f SurfaceNormal::getInersectionLinePlane(Eigen::Vector3f & pointA, Eigen::Vector3f & pointB, pcl::ModelCoefficients::Ptr & planeCoeff){
+    using namespace Eigen;
+        Matrix<float, 2, 4> AB;
+        Matrix<float, 2, 4> PQ;
+        Vector4f plane1, plane2, plane3, intersectionPoint;
+
+    AB = getVecSpanOfLine(pointA, pointB);
+    PQ = getOrthogonalPlanesContainingLine(AB);
+    plane1 = PQ.row(0);
+    plane2 = PQ.row(1);
+    plane3 << planeCoeff->values[0], planeCoeff->values[1], planeCoeff->values[2], planeCoeff->values[3];
+                   
+    intersectionPoint = getIntersectionPointOf3Planes(plane1, plane2, plane3);
+    ROS_DEBUG("Intersection of pointing finger ray and plane [%.3f, %.3f, %.3f, %.3f]", intersectionPoint[0], intersectionPoint[1], 
+                                                                                        intersectionPoint[2], intersectionPoint[3]);
+    
+    return intersectionPoint; 
+
+}
+
 void SurfaceNormal::pointCloud_callback(const sensor_msgs::PointCloud2Ptr& pointCloud_msg){
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr pointCloud (new pcl::PointCloud<pcl::PointXYZ>);   
@@ -168,43 +257,66 @@ void SurfaceNormal::pointCloud_callback(const sensor_msgs::PointCloud2Ptr& point
     ROS_DEBUG("New point cloud with %d points ", pointCloud->points.size());
     
     if (! isPointCloudValid(*pointCloud, minPointCloudSize)) {
-        ROS_FATAL("Not enough points in point cloud %d", (int)pointCloud->points.size());
+        ROS_DEBUG("Not enough points in point cloud: %d < %d", (int)pointCloud->points.size(), (int)minPointCloudSize);
+        return;
     }
 
     pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
     pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
     pcl::PointCloud<pcl::PointXYZ>::Ptr projectedPlane (new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr projectedPlaneHull (new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloudHull (new pcl::PointCloud<pcl::PointXYZ>);
     pcl::ExtractIndices<pcl::PointXYZ> extract;
     pcl::PointCloud<pcl::PointXYZ>::Ptr subsetToRemove (new pcl::PointCloud<pcl::PointXYZ>);   
     
+    Eigen::Vector3f vecSurfaceNormal;
+
     // remove all horizontal planes in plane cloud
     removeHorizontalPlanes(pointCloud, pointCloud_msg);
     
+    double theta;
     int counter = 0;
+    using std::acos;
+    
     while (pointCloud->points.size() > minPlaneSize) {        
         seg.setInputCloud(pointCloud);
         seg.segment(*inliers, *coefficients); 
         
+        ROS_DEBUG("plane %.3fx + %.3fy + %.3fz + %.3f ", coefficients->values[0], coefficients->values[1],
+                                                         coefficients->values[2], coefficients->values[3]);
         // check if the retrieved point cloud is large enough:
         if (! isPointCloudValid(*inliers, minPlaneSize)) {
-            ROS_DEBUG("Not enough points in segmened plane: %d", inliers->indices.size());
-            return;
+            ROS_DEBUG("Not enough points in segmented plane: %d", inliers->indices.size());
+            removeInliers(pointCloud, inliers);
+            continue;
+        }
+
+        vecSurfaceNormal = getSurfaceNormalVector(coefficients);
+        // calculate angle between plane and normal to horizontal plane ([0,1,0])
+        theta = acos(vecSurfaceNormal.dot(horizontalPlaneNormal) / (vecSurfaceNormal.norm() * horizontalPlaneNormal.norm()));
+        ROS_DEBUG("angle to horizontal plane %.3f [deg]", theta);
+        
+        if (abs(theta) * 180.0f / M_PI < horizontalPlaneAngleThresh){
+            ROS_DEBUG("Discarding plane %.3f[deg] < %.3f[deg]", theta, horizontalPlaneAngleThresh);
+            removeInliers(pointCloud, inliers);
+            continue;
         }
 
         // Project segmented inliers onto calculated plane
         projectInliersOn2DPlane(pointCloud, inliers, coefficients, projectedPlane);
-        
-        // Create a concave hull representation of the projected plane
-        getConcavHull(projectedPlane, chull, projectedPlaneHull);
-        
         publishPointCloud(projectedPlane, pointCloud_msg, cloud_publisher);
 
-        if (counter == 0){
-            publishPointCloud(projectedPlane, pointCloud_msg, selectedCloud_publisher);
-        }
+        // calculate point of intersection between pointing finger ray and plane
+        intersectionPfrayPlane = getInersectionLinePlane(pFRay, coefficients)
+        if (intersectionPoint.sum() == NAN){
+        ROS_DEBUG("No single solution to intersection of pointing finger ray with plane");
+        ROS_DEBUG("This is probably because pointing finger ray is in parralel with plane, or part of plane");
+    }
+        
+        // Create a concave hull representation of the projected plane
+        getConcavHull(projectedPlane, chull, cloudHull);
+        publishPointCloud(cloudHull, pointCloud_msg, cloudHull_publisher);
+        ROS_DEBUG("Cloud hull with %d points", cloudHull->points.size());
 
-        counter++;
 
         removeInliers(pointCloud, inliers);
 
@@ -250,3 +362,4 @@ int main(int argc, char **argv){
 
     ROS_INFO("EXIT");
 }   
+
